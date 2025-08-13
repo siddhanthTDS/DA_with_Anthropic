@@ -241,6 +241,12 @@ async def ping_claude(question_text, relevant_context="", max_tries=3):
     while tries < max_tries:
         try:
             print(f"claude is running {tries + 1} try")
+            
+            # Check if API key is available
+            if not anthropic_api_key:
+                print("❌ anthropic_api_key is not set")
+                return {"error": "ANTHROPIC_API_KEY not configured"}
+            
             headers = {
                 "x-api-key": anthropic_api_key,  # Use the variable defined at module level
                 "anthropic-version": "2023-06-01",
@@ -272,8 +278,13 @@ async def ping_claude(question_text, relevant_context="", max_tries=3):
                 # Parse and validate response
                 result = response.json()
                 
-                # Check if response has expected structure
-                if "content" in result and len(result["content"]) > 0:
+                # More thorough response validation
+                if (isinstance(result, dict) and 
+                    "content" in result and 
+                    isinstance(result["content"], list) and 
+                    len(result["content"]) > 0 and
+                    isinstance(result["content"][0], dict) and
+                    "text" in result["content"][0]):
                     return result
                 else:
                     print(f"⚠️ Unexpected response structure: {result}")
@@ -286,7 +297,8 @@ async def ping_claude(question_text, relevant_context="", max_tries=3):
             print(f"⏰ Claude API timeout on try {tries + 1}")
             tries += 1
         except httpx.HTTPStatusError as e:
-            print(f"🚫 Claude API HTTP error {e.response.status_code} on try {tries + 1}: {e.response.text}")
+            print(f"🚫 Claude API HTTP error {e.response.status_code} on try {tries + 1}")
+            # Avoid printing potentially large response text
             tries += 1
         except Exception as e:
             print(f"❌ Error during Claude call on try {tries + 1}: {e}")

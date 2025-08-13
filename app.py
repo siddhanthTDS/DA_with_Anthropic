@@ -429,7 +429,109 @@ async def ping_gemini_pro(question_text, relevant_context="", max_tries=3):
 
 
 
-
+async def analyze_image_with_claude(image_bytes: bytes, filename: str) -> dict:
+    """Send image to Claude for initial analysis before OCR"""
+    try:
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+        
+        # Determine image type
+        image_type = "image/png"
+        if filename.lower().endswith(('.jpg', '.jpeg')):
+            image_type = "image/jpeg"
+        elif filename.lower().endswith('.gif'):
+            image_type = "image/gif"
+        elif filename.lower().endswith('.webp'):
+            image_type = "image/webp"
+        
+        analysis_prompt = """
+        Analyze this image and tell me:
+        1. Does it contain data tables, charts, or graphs?
+        2. Are there any questions written in the image?
+        3. What can you see in this image?
+        4. Should I use OCR to extract more text?
+        
+        Give me a simple JSON response like:
+        {
+            "contains_data": true/false,
+            "contains_questions": true/false,
+            "content_type": "chart/table/document/other",
+            "needs_ocr": true/false,
+            "extracted_text": "what you can read",
+            "questions_found": ["any questions you see"]
+        }
+        """
+        
+        if not anthropic_api_key:
+            return {"success": False, "error": "No Claude API key"}
+        
+        payload = {
+            "model": "claude-3-5-sonnet-20241022",
+            "max_tokens": 2000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": analysis_prompt},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": image_type,
+                                "data": base64_image
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        headers = {
+            "x-api-key": anthropic_api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            if "content" in result and len(result["content"]) > 0:
+                claude_text = result["content"][0]["text"]
+                
+                # Try to find JSON in the response
+                json_match = re.search(r'\{.*\}', claude_text, re.DOTALL)
+                if json_match:
+                    try:
+                        analysis_data = json.loads(json_match.group())
+                        return {"success": True, "analysis": analysis_data, "raw": claude_text}
+                    except:
+                        pass
+                
+                # Fallback if no JSON found
+                return {
+                    "success": True, 
+                    "analysis": {
+                        "contains_data": "data" in claude_text.lower() or "chart" in claude_text.lower(),
+                        "contains_questions": "?" in claude_text,
+                        "content_type": "document",
+                        "needs_ocr": True,
+                        "extracted_text": claude_text,
+                        "questions_found": []
+                    },
+                    "raw": claude_text
+                }
+        
+        return {"success": False, "error": "No response from Claude"}
+        
+    except Exception as e:
+        print(f"❌ Claude image analysis failed: {e}")
+        return {"success": False, "error": str(e)}
+        
 
 def extract_json_from_output(output: str) -> str:
     """Extract JSON from output that might contain extra text"""
@@ -1275,45 +1377,128 @@ async def aianalyst(request: Request):
         question_text = "No questions provided"
 
     # Handle image if provided (existing logic)
+    # Handle image if provided - Claude first, then OCR if needed
     if image:
         try:
             image_bytes = await image.read()
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            print(f"🖼️ Processing image: {image.filename}")
             
-            if not ocr_api_key:
-                print("⚠️ OCR_API_KEY not found - skipping image processing")
-                question_text += "\n\nOCR API key not configured - image text extraction skipped"
-            else:
-                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                    form_data = {
-                        "base64Image": f"data:image/png;base64,{base64_image}",
-                        "apikey": ocr_api_key,
-                        "language": "eng",
-                        "scale": "true",
-                        "OCREngine": "1"
-                    }
-                    
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    }
-                    
-                    response = await client.post(OCR_API_URL, data=form_data, headers=headers)
-                    
-                    if response.status_code == 200:
-                        result = response.json()
-                        
-                        if not result.get('IsErroredOnProcessing', True):
-                            parsed_results = result.get('ParsedResults', [])
-                            if parsed_results:
-                                image_text = parsed_results[0].get('ParsedText', '').strip()
-                                if image_text:
-                                    question_text += f"\n\nExtracted from image:\n{image_text}"
-                                    print("✅ Text extracted from image")
+            # Step 1: Ask Claude to analyze the image
+            claude_result = await analyze_image_with_claude(image_bytes, image.filename)
+            
+            if claude_result["success"]:
+                analysis = claude_result["analysis"]
+                print(f"🔍 Claude Analysis:")
+                print(f"  - Contains data: {analysis.get('contains_data')}")
+                print(f"  - Contains questions: {analysis.get('contains_questions')}")
+                print(f"  - Content type: {analysis.get('content_type')}")
+                print(f"  - Needs OCR: {analysis.get('needs_ocr')}")
+                
+                # Add what Claude found to our questions
+                if analysis.get('extracted_text'):
+                    question_text += f"\n\nClaude's image analysis:\n{analysis['extracted_text']}"
+                
+                # Add any questions Claude found
+                if analysis.get('questions_found'):
+                    for i, q in enumerate(analysis['questions_found']):
+                        question_text += f"\n\nQuestion from image {i+1}: {q}"
+                
+                # Add data description if it's a chart or table
+                if analysis.get('contains_data'):
+                    content_type = analysis.get('content_type', 'data')
+                    if content_type == 'chart':
+                        question_text += f"\n\nChart Analysis Request: Please analyze the chart shown in the image and extract key insights."
+                    elif content_type == 'table':
+                        question_text += f"\n\nTable Analysis Request: Please extract and analyze the tabular data shown in the image."
                     else:
-                        print(f"❌ OCR API error: {response.status_code}")
+                        question_text += f"\n\nData Analysis Request: Please analyze the data content shown in the image."
+                
+                # Step 2: Use OCR only if Claude thinks we need it
+                if analysis.get('needs_ocr', True):
+                    if not ocr_api_key:
+                        print("⚠️ OCR_API_KEY not found - skipping additional OCR processing")
+                        question_text += "\n\nOCR API key not configured - additional text extraction skipped"
+                    else:
+                        print("📝 Claude recommends OCR - extracting additional text...")
+                        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                        
+                        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                            form_data = {
+                                "base64Image": f"data:image/png;base64,{base64_image}",
+                                "apikey": ocr_api_key,
+                                "language": "eng",
+                                "scale": "true",
+                                "OCREngine": "1"
+                            }
+                            
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                            }
+                            
+                            response = await client.post(OCR_API_URL, data=form_data, headers=headers)
+                            
+                            if response.status_code == 200:
+                                result = response.json()
+                                
+                                if not result.get('IsErroredOnProcessing', True):
+                                    parsed_results = result.get('ParsedResults', [])
+                                    if parsed_results:
+                                        ocr_text = parsed_results[0].get('ParsedText', '').strip()
+                                        if ocr_text:
+                                            question_text += f"\n\nAdditional OCR extracted text:\n{ocr_text}"
+                                            print("✅ Additional text extracted via OCR")
+                                        else:
+                                            print("ℹ️ OCR completed but no additional text found")
+                                    else:
+                                        print("ℹ️ OCR completed but no results returned")
+                                else:
+                                    print(f"❌ OCR processing failed: {result.get('ErrorMessage', 'Unknown error')}")
+                            else:
+                                print(f"❌ OCR API error: {response.status_code}")
+                else:
+                    print("✅ Claude's analysis is sufficient, skipping OCR")
+                    
+            else:
+                print(f"⚠️ Claude analysis failed: {claude_result.get('error')}")
+                print("📝 Falling back to OCR only...")
+                
+                # Fallback to OCR if Claude fails
+                if not ocr_api_key:
+                    print("⚠️ OCR_API_KEY not found - skipping image processing entirely")
+                    question_text += "\n\nBoth Claude image analysis and OCR API key not available - image processing skipped"
+                else:
+                    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                    
+                    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                        form_data = {
+                            "base64Image": f"data:image/png;base64,{base64_image}",
+                            "apikey": ocr_api_key,
+                            "language": "eng",
+                            "scale": "true",
+                            "OCREngine": "1"
+                        }
+                        
+                        headers = {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                        }
+                        
+                        response = await client.post(OCR_API_URL, data=form_data, headers=headers)
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            
+                            if not result.get('IsErroredOnProcessing', True):
+                                parsed_results = result.get('ParsedResults', [])
+                                if parsed_results:
+                                    image_text = parsed_results[0].get('ParsedText', '').strip()
+                                    if image_text:
+                                        question_text += f"\n\nExtracted from image (OCR fallback):\n{image_text}"
+                                        print("✅ Text extracted from image via OCR fallback")
+                        else:
+                            print(f"❌ OCR API error: {response.status_code}")
                     
         except Exception as e:
-            print(f"❌ Error extracting text from image: {e}")
+            print(f"❌ Error processing image: {e}")
 
     # Handle archive files (TAR, ZIP) - extract and route contents to appropriate processors
     extracted_from_archives = {
@@ -1351,44 +1536,117 @@ async def aianalyst(request: Request):
                     print(f"⚠️ Failed to read extracted text file {txt_file_path}: {e}")
             
             # Process extracted images for OCR
+            # Process extracted images - Claude first, then OCR if needed
             for img_file_path in extracted_from_archives['image_files']:
-                if not ocr_api_key:
-                    print("⚠️ OCR_API_KEY not found - skipping extracted image processing")
-                    continue
-                    
                 try:
+                    print(f"🖼️ Processing extracted image: {os.path.basename(img_file_path)}")
+                    
                     with open(img_file_path, 'rb') as f:
                         image_bytes = f.read()
-                    base64_image = base64.b64encode(image_bytes).decode("utf-8")
                     
-                    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                        form_data = {
-                            "base64Image": f"data:image/png;base64,{base64_image}",
-                            "apikey": ocr_api_key,
-                            "language": "eng",
-                            "scale": "true",
-                            "OCREngine": "1"
-                        }
+                    # Step 1: Ask Claude to analyze the extracted image
+                    claude_result = await analyze_image_with_claude(image_bytes, os.path.basename(img_file_path))
+                    
+                    if claude_result["success"]:
+                        analysis = claude_result["analysis"]
                         
-                        headers = {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                        }
+                        print(f"🔍 Claude Analysis for {os.path.basename(img_file_path)}:")
+                        print(f"  - Contains data: {analysis.get('contains_data')}")
+                        print(f"  - Contains questions: {analysis.get('contains_questions')}")
+                        print(f"  - Needs OCR: {analysis.get('needs_ocr')}")
                         
-                        response = await client.post(OCR_API_URL, data=form_data, headers=headers)
+                        # Add Claude's analysis to questions
+                        if analysis.get('extracted_text'):
+                            question_text += f"\n\nClaude analysis from archive image ({os.path.basename(img_file_path)}):\n{analysis['extracted_text']}"
                         
-                        if response.status_code == 200:
-                            result = response.json()
+                        # Add any questions Claude found
+                        if analysis.get('questions_found'):
+                            for i, q in enumerate(analysis['questions_found']):
+                                question_text += f"\n\nQuestion from archive image {os.path.basename(img_file_path)} #{i+1}: {q}"
+                        
+                        # Add data analysis request if needed
+                        if analysis.get('contains_data'):
+                            content_type = analysis.get('content_type', 'data')
+                            question_text += f"\n\nData from archive image ({os.path.basename(img_file_path)}): Please analyze the {content_type} content shown."
+                        
+                        # Only use OCR if Claude recommends it
+                        if analysis.get('needs_ocr', True):
+                            if not ocr_api_key:
+                                print("⚠️ OCR_API_KEY not found - skipping additional OCR for extracted image")
+                                continue
                             
-                            if not result.get('IsErroredOnProcessing', True):
-                                parsed_results = result.get('ParsedResults', [])
-                                if parsed_results:
-                                    image_text = parsed_results[0].get('ParsedText', '').strip()
-                                    if image_text:
-                                        question_text += f"\n\nExtracted from archive image ({os.path.basename(img_file_path)}):\n{image_text}"
-                                        print(f"✅ Text extracted from archive image: {os.path.basename(img_file_path)}")
+                            print(f"📝 Using OCR for additional text from {os.path.basename(img_file_path)}...")
+                            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                            
+                            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                                form_data = {
+                                    "base64Image": f"data:image/png;base64,{base64_image}",
+                                    "apikey": ocr_api_key,
+                                    "language": "eng",
+                                    "scale": "true",
+                                    "OCREngine": "1"
+                                }
+                                
+                                headers = {
+                                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                                }
+                                
+                                response = await client.post(OCR_API_URL, data=form_data, headers=headers)
+                                
+                                if response.status_code == 200:
+                                    result = response.json()
+                                    
+                                    if not result.get('IsErroredOnProcessing', True):
+                                        parsed_results = result.get('ParsedResults', [])
+                                        if parsed_results:
+                                            image_text = parsed_results[0].get('ParsedText', '').strip()
+                                            if image_text:
+                                                question_text += f"\n\nAdditional OCR from archive image ({os.path.basename(img_file_path)}):\n{image_text}"
+                                                print(f"✅ Additional text extracted via OCR from {os.path.basename(img_file_path)}")
+                                else:
+                                    print(f"❌ OCR API error for {img_file_path}: {response.status_code}")
                         else:
-                            print(f"❌ OCR API error for {img_file_path}: {response.status_code}")
+                            print(f"✅ Claude's analysis sufficient for {os.path.basename(img_file_path)}, skipping OCR")
                             
+                    else:
+                        print(f"⚠️ Claude analysis failed for {img_file_path}: {claude_result.get('error')}")
+                        print("📝 Falling back to OCR only...")
+                        
+                        # Fallback to OCR only
+                        if not ocr_api_key:
+                            print("⚠️ OCR_API_KEY not found - skipping extracted image processing")
+                            continue
+                            
+                        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                        
+                        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                            form_data = {
+                                "base64Image": f"data:image/png;base64,{base64_image}",
+                                "apikey": ocr_api_key,
+                                "language": "eng",
+                                "scale": "true",
+                                "OCREngine": "1"
+                            }
+                            
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                            }
+                            
+                            response = await client.post(OCR_API_URL, data=form_data, headers=headers)
+                            
+                            if response.status_code == 200:
+                                result = response.json()
+                                
+                                if not result.get('IsErroredOnProcessing', True):
+                                    parsed_results = result.get('ParsedResults', [])
+                                    if parsed_results:
+                                        image_text = parsed_results[0].get('ParsedText', '').strip()
+                                        if image_text:
+                                            question_text += f"\n\nExtracted from archive image ({os.path.basename(img_file_path)}) - OCR fallback:\n{image_text}"
+                                            print(f"✅ Text extracted via OCR fallback from {os.path.basename(img_file_path)}")
+                            else:
+                                print(f"❌ OCR API error for {img_file_path}: {response.status_code}")
+                        
                 except Exception as e:
                     print(f"❌ Error processing extracted image {img_file_path}: {e}")
                     

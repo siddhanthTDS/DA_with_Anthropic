@@ -236,22 +236,31 @@ def read_prompt_file(filename: str, default: str = "") -> str:
         return default
     
 async def ping_claude(question_text, relevant_context="", max_tries=3):
+    """Call Claude API with proper error handling and response parsing."""
     tries = 0
     while tries < max_tries:
         try:
             print(f"claude is running {tries + 1} try")
             headers = {
-                "x-api-key": os.getenv("ANTHROPIC_API_KEY"),
+                "x-api-key": anthropic_api_key,  # Use the variable defined at module level
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json"
             }
+            
+            # Prepare the message content
+            if relevant_context:
+                content = f"{relevant_context}\n\n{question_text}"
+            else:
+                content = question_text
+                
             payload = {
                 "model": "claude-3-5-sonnet-20241022",
                 "max_tokens": 4096,
                 "messages": [
-                    {"role": "user", "content": f"{relevant_context}\n\n{question_text}" if relevant_context else question_text}
+                    {"role": "user", "content": content}
                 ]
             }
+            
             async with httpx.AsyncClient(timeout=120) as client:
                 response = await client.post(
                     "https://api.anthropic.com/v1/messages",
@@ -259,10 +268,30 @@ async def ping_claude(question_text, relevant_context="", max_tries=3):
                     json=payload
                 )
                 response.raise_for_status()
-                return response.json()
-        except Exception as e:
-            print(f"Error during Claude call: {e}")
+                
+                # Parse and validate response
+                result = response.json()
+                
+                # Check if response has expected structure
+                if "content" in result and len(result["content"]) > 0:
+                    return result
+                else:
+                    print(f"⚠️ Unexpected response structure: {result}")
+                    tries += 1
+                    if tries >= max_tries:
+                        return {"error": f"Invalid response structure after {max_tries} tries"}
+                    continue
+                    
+        except httpx.TimeoutException:
+            print(f"⏰ Claude API timeout on try {tries + 1}")
             tries += 1
+        except httpx.HTTPStatusError as e:
+            print(f"🚫 Claude API HTTP error {e.response.status_code} on try {tries + 1}: {e.response.text}")
+            tries += 1
+        except Exception as e:
+            print(f"❌ Error during Claude call on try {tries + 1}: {e}")
+            tries += 1
+            
     return {"error": "Claude failed after max retries"}
 
 async def ping_gemini(question_text, relevant_context="", max_tries=3):

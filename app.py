@@ -11,7 +11,6 @@ import time
 import subprocess
 import json
 from dotenv import load_dotenv
-import os
 import data_scrape
 import functools
 import re
@@ -26,6 +25,7 @@ import tarfile
 import zipfile
 import tempfile
 import shutil
+import os
 
 app = FastAPI()
 load_dotenv()

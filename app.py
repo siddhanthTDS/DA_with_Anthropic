@@ -1264,7 +1264,7 @@ async def aianalyst(request: Request):
     if json_file: print(f"  🗂️ JSON: {json_file.filename}")
     if archive_files: print(f"  📦 Archives: {[f.filename for f in archive_files]}")
     
-    # Handle questions text file
+    
     # Handle questions text file
     question_text = ""
     if questions_file_upload:
@@ -1273,31 +1273,6 @@ async def aianalyst(request: Request):
         print(f"📝 Questions loaded from file: {questions_file_upload.filename}")
     else:
         question_text = "No questions provided"
-
-    # Check for simple questions that don't need file processing
-    if len(uploaded_files) == 0 and len(question_text) < 1000:
-        question_lower = question_text.lower()
-        data_keywords = ['upload', 'file', 'csv', 'dataset', 'url', 'website', 'data from', 'analyze data']
-        
-        if not any(keyword in question_lower for keyword in data_keywords):
-            print("💬 Simple question detected - asking LLM directly")
-            try:
-                simple_prompt = f"""Answer this question directly in JSON format:
-                {{"question": "{question_text}", "answer": "your answer here"}}
-                
-                Question: {question_text}"""
-                
-                claude_response = await ping_claude(simple_prompt, "Return only valid JSON")
-                if "error" not in claude_response:
-                    response_text = claude_response["content"][0]["text"]
-                    if "```json" in response_text:
-                        response_text = response_text.split("```json")[1].split("```")[0].strip()
-                    
-                    result = json.loads(response_text)
-                    _cleanup_created_files(created_files)
-                    return JSONResponse(content=result, media_type="application/json")
-            except Exception as e:
-                print(f"Simple question failed: {e}")
 
     # Handle image if provided (existing logic)
     if image:

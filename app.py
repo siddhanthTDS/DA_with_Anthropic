@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, UploadFile, File, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -2077,5 +2078,7 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "Data Analyst service is running"}
 
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

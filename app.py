@@ -247,7 +247,7 @@ async def ping_claude(question_text, relevant_context="", max_tries=3):
                 "content-type": "application/json"
             }
             payload = {
-                "model": "Claude Sonnet 4",
+                "model": "claude-sonnet-4-20250514",
                 "max_tokens": 4096,
                 "messages": [
                     {"role": "user", "content": f"{relevant_context}\n\n{question_text}" if relevant_context else question_text}
@@ -433,7 +433,7 @@ async def analyze_image_with_claude(image_bytes: bytes, filename: str) -> dict:
             return {"success": False, "error": "No Claude API key"}
         
         payload = {
-            "model": "Claude Sonnet 4",
+            "model": "claude-sonnet-4-20250514",
             "max_tokens": 2000,
             "messages": [
                 {
